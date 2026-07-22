@@ -7,7 +7,7 @@ from pypdf import PdfReader
 from google import genai
 from google.genai import types
 
-# ページ基本設定
+# Page setup
 st.set_page_config(
     page_title="講義ノート AI アシスタント",
     page_icon="🎓",
@@ -15,21 +15,55 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Gemini クライアント初期化
+# Initialize Gemini Client
+def fetch_env_api_key():
+    # 1. Streamlit Secretsから取得
+    try:
+        if "GEMINI_API_KEY" in st.secrets:
+            return st.secrets["GEMINI_API_KEY"]
+    except Exception:
+        pass
+    # 2. OS環境変数から取得
+    return os.environ.get("GEMINI_API_KEY")
+
 @st.cache_resource
 def get_gemini_client(api_key: str = None):
-    key = api_key or os.environ.get("GEMINI_API_KEY")
+    key = api_key or fetch_env_api_key()
     if not key:
         return None
     return genai.Client(api_key=key)
 
-# セッション状態の初期化
+# Initialize session states
 if "sessions" not in st.session_state:
     st.session_state.sessions = []
 if "active_session_id" not in st.session_state:
     st.session_state.active_session_id = None
 
-# PDFテキスト抽出ヘルパー
+# Custom CSS for clean UI
+st.markdown("""
+<style>
+    .main-header {
+        font-size: 1.8rem;
+        font-weight: 700;
+        color: #1e293b;
+        margin-bottom: 0.5rem;
+    }
+    .sub-header {
+        color: #64748b;
+        font-size: 0.95rem;
+        margin-bottom: 1.5rem;
+    }
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 8px;
+    }
+    .stTabs [data-baseweb="tab"] {
+        padding: 8px 16px;
+        border-radius: 8px;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# Helper function to extract text from PDF
 def extract_text_from_pdf(pdf_file) -> str:
     reader = PdfReader(pdf_file)
     text = ""
@@ -39,7 +73,7 @@ def extract_text_from_pdf(pdf_file) -> str:
             text += extracted + "\n"
     return text
 
-# 講義資料の構造化分析 (要約 + 小テスト生成)
+# Analyze lecture material using Gemini
 def analyze_lecture_material(client: genai.Client, parts: list):
     system_instruction = """
 あなたは優秀な大学講師兼AI教育スペシャリストです。
@@ -90,7 +124,7 @@ def analyze_lecture_material(client: genai.Client, parts: list):
     )
     return json.loads(response.text)
 
-# 手書き・記述解答のAI画像自動採点
+# Grade handwritten / image / open-ended response using Gemini
 def grade_user_answer(client: genai.Client, question: str, correct_answer: str, user_answer_text: str = None, user_image: Image.Image = None):
     system_instruction = """
 あなたは大学の厳格かつ親切な採点AI採点官です。
@@ -130,7 +164,7 @@ def grade_user_answer(client: genai.Client, question: str, correct_answer: str, 
     )
     return json.loads(response.text)
 
-# AIチューター対話生成
+# Chat response generator with Gemini
 def generate_chat_response(client: genai.Client, history: list, new_message: str, lecture_context: str):
     system_instruction = f"""
 あなたは講義資料に関する質問に答える親切で優秀なAIチューターです。
@@ -162,13 +196,13 @@ def generate_chat_response(client: genai.Client, history: list, new_message: str
     )
     return response.text
 
-# ---------------- UIレイアウト ----------------
+# ---------------- Streamlit UI ----------------
 
-# サイドバー
+# Sidebar API Key & Session List
 with st.sidebar:
     st.title("🎓 講義アシスタント")
     
-    api_key_input = st.text_input("Gemini API Key", type="password", help="環境変数が設定されていない場合に入力")
+    api_key_input = st.text_input("Gemini API Key", type="password", help="GEMINI_API_KEY環境変数がない場合は入力してください")
     client = get_gemini_client(api_key_input)
     
     st.divider()
@@ -183,13 +217,14 @@ with st.sidebar:
             st.session_state.active_session_id = sess['id']
             st.rerun()
 
-# メインビュー
-st.title("🎓 AI 講義ノート & 理解度テスト")
+# Main View
+st.markdown('<div class="main-header">🎓 AI 講義ノート & 理解度テスト</div>', unsafe_allow_html=True)
 
+# If no active session, show Upload View
 active_session = next((s for s in st.session_state.sessions if s['id'] == st.session_state.active_session_id), None)
 
 if not active_session:
-    st.caption("講義スライド、レジュメ画像、PDF、録音音声、または講義ノートテキストをアップロードして分析を開始します。")
+    st.markdown('<div class="sub-header">講義スライド、レジュメ画像、PDF、録音音声、または講義ノートテキストをアップロードして分析を開始します。</div>', unsafe_allow_html=True)
     
     if not client:
         st.warning("⚠️ APIキーが見つかりません。サイドバーに GEMINI_API_KEY を入力するか環境変数を設定してください。")
@@ -214,11 +249,12 @@ if not active_session:
                 st.image(image, caption="アップロードされた講義画像", use_container_width=True)
                 uploaded_parts.append(image)
             else:
+                # Audio / other binary
                 uploaded_parts.append(types.Part.from_bytes(data=file_bytes, mime_type=mime_type))
                 st.audio(file_bytes, format=mime_type)
 
     else:
-        text_input = st.text_area("講義ノート・文字起こしテキストを入力", height=200, placeholder="ここに講義メモを入力...")
+        text_input = st.text_area("講義ノート・文字起こしテキストを入力", height=200, placeholder="ここに講義のメモやテキストを貼り付けてください...")
         if text_input.strip():
             uploaded_parts.append(text_input)
 
@@ -247,12 +283,12 @@ if not active_session:
                     st.error(f"解析エラーが発生しました: {e}")
 
 else:
-    # アクティブセッション画面
+    # Active Session Header
     st.subheader(f"📖 {active_session['title']}")
     
     tab1, tab2, tab3 = st.tabs(["📝 講義要約・ポイント", "🧪 理解度テスト", "💬 AIチューターと会話"])
 
-    # --- TAB 1: 要約 ---
+    # --- TAB 1: Summary ---
     with tab1:
         st.markdown("### 📌 講義の要約")
         st.markdown(active_session['summaryText'])
@@ -262,92 +298,106 @@ else:
         for idx, point in enumerate(active_session['keyPoints'], 1):
             st.markdown(f"**{idx}.** {point}")
 
-    # --- TAB 2: テスト ---
+    # --- TAB 2: Quizzes ---
     with tab2:
         st.markdown("### 🧪 理解度テスト")
-        quizzes = active_session['quizzes']
         
-        for q_idx, q in enumerate(quizzes, 1):
-            st.markdown(f"#### 問題 {q_idx} [{q['type']}]")
-            st.markdown(q['question'])
-            
-            attempt = active_session['attempts'].get(q['id'])
-            
-            if attempt:
-                if attempt.get("isCorrect"):
-                    st.success(f"⭕ 正解！ (あなたの回答: {attempt['userAnswer']})")
-                else:
-                    st.error(f"❌ 不正解 (あなたの回答: {attempt['userAnswer']})")
+        quizzes = active_session['quizzes']
+        if not quizzes:
+            st.info("テスト問題が生成されていません。")
+        else:
+            for q_idx, q in enumerate(quizzes, 1):
+                st.markdown(f"#### 問題 {q_idx} [{q['type']}]")
+                st.markdown(q['question'])
                 
-                st.markdown(f"**模範解答:** {q['correctAnswer']}")
-                if attempt.get("gradedFeedback"):
-                    st.info(f"**AIフィードバック:**\n{attempt['gradedFeedback']}")
-                else:
-                    st.markdown(f"**解説:** {q['explanation']}")
-                st.divider()
-            else:
-                with st.form(key=f"form_{q['id']}"):
-                    user_ans_text = None
-                    uploaded_handwriting = None
-                    
-                    if q['type'] == 'multiple-choice':
-                        user_ans_text = st.radio("選択肢を選んでください", q.get('choices', []), key=f"radio_{q['id']}")
+                attempt = active_session['attempts'].get(q['id'])
+                
+                if attempt:
+                    # Already answered
+                    if attempt.get("isCorrect"):
+                        st.success(f"⭕ 正解！ (あなたの回答: {attempt['userAnswer']})")
                     else:
-                        answer_method = st.radio("解答方法", ["テキスト入力", "手書き/ノート画像アップロード"], key=f"method_{q['id']}")
-                        if answer_method == "テキスト入力":
-                            user_ans_text = st.text_input("解答を入力（数式や数値など）", key=f"text_{q['id']}")
-                        else:
-                            img_file = st.file_uploader("手書きノート画像をアップロード", type=["png", "jpg", "jpeg"], key=f"img_{q['id']}")
-                            if img_file:
-                                uploaded_handwriting = Image.open(img_file)
-                                st.image(uploaded_handwriting, caption="提出画像プレビュー", width=300)
+                        st.error(f"❌ 不正解 (あなたの回答: {attempt['userAnswer']})")
                     
-                    submit_btn = st.form_submit_button("解答を提出")
-                    
-                    if submit_btn:
-                        if not user_ans_text and not uploaded_handwriting:
-                            st.warning("解答を入力または画像を添付してください。")
+                    st.markdown(f"**模範解答:** {q['correctAnswer']}")
+                    if attempt.get("gradedFeedback"):
+                        st.info(f"**AIフィードバック:**\n{attempt['gradedFeedback']}")
+                    else:
+                        st.markdown(f"**解説:** {q['explanation']}")
+                    st.divider()
+                else:
+                    # Answering form
+                    with st.form(key=f"form_{q['id']}"):
+                        user_ans_text = None
+                        uploaded_handwriting = None
+                        
+                        if q['type'] == 'multiple-choice':
+                            user_ans_text = st.radio("選択肢を選んでください", q.get('choices', []), key=f"radio_{q['id']}")
                         else:
-                            with st.spinner("採点中..."):
-                                if q['type'] == 'multiple-choice':
-                                    is_correct = (user_ans_text == q['correctAnswer'])
-                                    active_session['attempts'][q['id']] = {
-                                        "userAnswer": user_ans_text,
-                                        "isCorrect": is_correct,
-                                        "gradedFeedback": None
-                                    }
-                                else:
-                                    grade_res = grade_user_answer(
-                                        client,
-                                        question=q['question'],
-                                        correct_answer=q['correctAnswer'],
-                                        user_answer_text=user_ans_text,
-                                        user_image=uploaded_handwriting
-                                    )
-                                    active_session['attempts'][q['id']] = {
-                                        "userAnswer": user_ans_text or "（画像解答）",
-                                        "isCorrect": grade_res.get("isCorrect", False),
-                                        "gradedFeedback": grade_res.get("gradedFeedback", "")
-                                    }
-                                st.success("採点が完了しました！")
-                                st.rerun()
+                            answer_method = st.radio("解答方法", ["テキスト入力", "手書き/ノート画像アップロード"], key=f"method_{q['id']}")
+                            if answer_method == "テキスト入力":
+                                user_ans_text = st.text_input("解答を入力（数式や数値など）", key=f"text_{q['id']}")
+                            else:
+                                img_file = st.file_uploader("手書きノート画像をアップロード", type=["png", "jpg", "jpeg"], key=f"img_{q['id']}")
+                                if img_file:
+                                    uploaded_handwriting = Image.open(img_file)
+                                    st.image(uploaded_handwriting, caption="提出画像プレビュー", width=300)
+                        
+                        submit_btn = st.form_submit_button("解答を提出")
+                        
+                        if submit_btn:
+                            if not user_ans_text and not uploaded_handwriting:
+                                st.warning("解答を入力または画像を添付してください。")
+                            else:
+                                with st.spinner("採点中..."):
+                                    if q['type'] == 'multiple-choice':
+                                        is_correct = (user_ans_text == q['correctAnswer'])
+                                        active_session['attempts'][q['id']] = {
+                                            "userAnswer": user_ans_text,
+                                            "isCorrect": is_correct,
+                                            "gradedFeedback": None
+                                        }
+                                    else:
+                                        # Use Gemini AI grading for written/image answers
+                                        grade_res = grade_user_answer(
+                                            client,
+                                            question=q['question'],
+                                            correct_answer=q['correctAnswer'],
+                                            user_answer_text=user_ans_text,
+                                            user_image=uploaded_handwriting
+                                        )
+                                        active_session['attempts'][q['id']] = {
+                                            "userAnswer": user_ans_text or "（画像解答）",
+                                            "isCorrect": grade_res.get("isCorrect", False),
+                                            "gradedFeedback": grade_res.get("gradedFeedback", "")
+                                        }
+                                    st.success("採点が完了しました！")
+                                    st.rerun()
 
-    # --- TAB 3: チャット ---
+    # --- TAB 3: AI Chat ---
     with tab3:
         st.markdown("### 💬 AI講義メンター")
+        st.caption("講義内容の疑問、公式の証明、補足問題などをAIに質問できます。")
+        
         chat_history = active_session.get("chatHistory", [])
         
+        # Display past messages
         for msg in chat_history:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
         
+        # User Chat Input
         if user_prompt := st.chat_input("講義内容について質問する..."):
+            # Display user message
             with st.chat_message("user"):
                 st.markdown(user_prompt)
             
             chat_history.append({"role": "user", "content": user_prompt})
+            
+            # Prepare context
             lecture_ctx = f"講義: {active_session['title']}\n要約: {active_session['summaryText']}\nポイント: {', '.join(active_session['keyPoints'])}"
             
+            # Generate response
             with st.chat_message("assistant"):
                 with st.spinner("思考中..."):
                     try:
