@@ -187,7 +187,7 @@ def generate_chat_response(client: genai.Client, history: list, new_message: str
     formatted_contents.append(types.Content(role="user", parts=[types.Part.from_text(text=new_message)]))
 
     response = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-3.6-flash",
         contents=formatted_contents,
         config=types.GenerateContentConfig(
             system_instruction=system_instruction,
