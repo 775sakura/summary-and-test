@@ -114,7 +114,7 @@ def analyze_lecture_material(client: genai.Client, parts: list):
 """
 
     response = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-3.6-flash",
         contents=[*parts, "講義資料を分析して指定のJSON形式で出力してください。"],
         config=types.GenerateContentConfig(
             system_instruction=system_instruction,
