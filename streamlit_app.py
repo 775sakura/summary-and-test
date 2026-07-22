@@ -154,7 +154,7 @@ def grade_user_answer(client: genai.Client, question: str, correct_answer: str, 
         contents.append("【学生の手書き画像解答】（添付画像）")
 
     response = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-3.6-flash",
         contents=contents,
         config=types.GenerateContentConfig(
             system_instruction=system_instruction,
