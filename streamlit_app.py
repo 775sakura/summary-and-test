@@ -3,6 +3,7 @@ import json
 import io
 import uuid
 import re
+import base64
 import traceback
 import streamlit as st
 import streamlit.components.v1 as components
@@ -55,7 +56,6 @@ def parse_json_safely(raw_text: str):
 
 # Robust Gemini API Call with Model Fallback
 def call_gemini_api(client: genai.Client, contents: list, config: types.GenerateContentConfig):
-    # Try gemini-3.6-flash first, fallback to 2.5-flash or 1.5-flash if needed
     candidate_models = ["gemini-3.6-flash", "gemini-2.5-flash", "gemini-1.5-flash"]
     last_exception = None
 
@@ -141,63 +141,144 @@ def format_file_size(size_bytes: int) -> str:
     else:
         return f"{size_bytes / (1024 * 1024):.1f} MB"
 
-# Pure HTML5 Handwriting Canvas Component
-def render_html5_canvas(quiz_id: str):
+# High-Performance HTML5 Canvas Component with Eraser, Apple Pencil Only Mode, and Auto Base64 Export
+def render_apple_pencil_canvas(quiz_id: str):
     canvas_html = f"""
-    <div style="font-family: sans-serif; background: #0f172a; padding: 12px; border-radius: 12px; color: white;">
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-            <span style="font-size: 12px; font-weight: bold; color: #94a3b8;">🎨 手書きキャンバス（マウス/タッチ対応）</span>
-            <button onclick="clearCanvas()" style="background: #334155; color: white; border: none; padding: 4px 10px; border-radius: 6px; cursor: pointer; font-size: 11px;">消去</button>
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <style>
+            * {{ box-sizing: border-box; user-select: none; -webkit-user-select: none; }}
+            body {{ margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: white; border-radius: 12px; }}
+            .container {{ padding: 12px; }}
+            .toolbar {{ display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; justify-content: space-between; }}
+            .tool-group {{ display: flex; gap: 6px; align-items: center; }}
+            .btn {{ background: #334155; color: white; border: 1px solid #475569; padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 600; display: flex; align-items: center; gap: 4px; transition: all 0.15s ease; }}
+            .btn:hover {{ background: #475569; }}
+            .btn.active {{ background: #4f46e5; border-color: #6366f1; color: white; }}
+            .badge {{ font-size: 10px; background: #1e1b4b; color: #a5b4fc; padding: 2px 6px; border-radius: 4px; border: 1px solid #3730a3; }}
+            .canvas-wrapper {{ position: relative; width: 100%; border-radius: 8px; overflow: hidden; border: 1px solid #334155; background: #0f172a; }}
+            canvas {{ display: block; width: 100%; height: 220px; background: #0f172a; cursor: crosshair; touch-action: none; }}
+            .hint {{ font-size: 11px; color: #94a3b8; margin-top: 6px; display: flex; justify-content: space-between; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="toolbar">
+                <div class="tool-group">
+                    <button id="modePen" class="btn active" onclick="setMode('pen')">✏️ ペン</button>
+                    <button id="modeEraser" class="btn" onclick="setMode('eraser')">🧹 消しゴム</button>
+                    <button class="btn" onclick="clearCanvas()">🗑️ 全消去</button>
+                </div>
+                <div class="tool-group">
+                    <label style="font-size: 11px; color: #cbd5e1;">線の太さ:</label>
+                    <input type="range" id="sizeRange" min="1" max="25" value="3" oninput="updateSize(this.value)" style="width: 70px;">
+                    <span id="penOnlyStatus" class="badge">✏️ Apple Pencil 専用 (指=スクロール)</span>
+                </div>
+            </div>
+            
+            <div class="canvas-wrapper">
+                <canvas id="canvas_{quiz_id}"></canvas>
+            </div>
+            
+            <div class="hint">
+                <span>💡 💡 Apple Pencilで描画・消去できます。指でなぞると画面がスライド動作します。</span>
+            </div>
         </div>
-        <canvas id="canvas_{quiz_id}" width="500" height="200" style="background: #1e293b; border: 1px solid #475569; border-radius: 8px; cursor: crosshair; touch-action: none;"></canvas>
-        <p style="font-size: 11px; color: #94a3b8; margin-top: 6px;">※ 描画後、画面のスクショまたはノート写真を選んで添付・送信してください。</p>
-    </div>
-    <script>
-        const canvas = document.getElementById("canvas_{quiz_id}");
-        const ctx = canvas.getContext("2d");
-        ctx.strokeStyle = "#ffffff";
-        ctx.lineWidth = 3;
-        ctx.lineCap = "round";
 
-        let drawing = false;
+        <script>
+            const canvas = document.getElementById("canvas_{quiz_id}");
+            const ctx = canvas.getContext("2d");
+            
+            // Handle retina display crispness
+            function resizeCanvas() {{
+                const rect = canvas.getBoundingClientRect();
+                canvas.width = rect.width * 2;
+                canvas.height = 220 * 2;
+                ctx.scale(2, 2);
+                ctx.lineCap = "round";
+                ctx.lineJoin = "round";
+                ctx.strokeStyle = "#ffffff";
+                ctx.lineWidth = currentSize;
+            }}
+            
+            let currentMode = "pen"; // "pen" or "eraser"
+            let currentSize = 3;
+            let isDrawing = false;
+            let pencilOnly = true; // Strict Apple Pencil detection
 
-        function startDraw(e) {{
-            drawing = true;
-            ctx.beginPath();
-            const rect = canvas.getBoundingClientRect();
-            const x = (e.clientX || e.touches[0].clientX) - rect.left;
-            const y = (e.clientY || e.touches[0].clientY) - rect.top;
-            ctx.moveTo(x, y);
-        }}
+            setTimeout(resizeCanvas, 50);
 
-        function draw(e) {{
-            if (!drawing) return;
-            const rect = canvas.getBoundingClientRect();
-            const x = (e.clientX || e.touches[0].clientX) - rect.left;
-            const y = (e.clientY || e.touches[0].clientY) - rect.top;
-            ctx.lineTo(x, y);
-            ctx.stroke();
-        }}
+            function setMode(mode) {{
+                currentMode = mode;
+                document.getElementById("modePen").classList.toggle("active", mode === "pen");
+                document.getElementById("modeEraser").classList.toggle("active", mode === "eraser");
+            }}
 
-        function stopDraw() {{
-            drawing = false;
-        }}
+            function updateSize(val) {{
+                currentSize = parseInt(val);
+            }}
 
-        function clearCanvas() {{
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
-        }}
+            function clearCanvas() {{
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+            }}
 
-        canvas.addEventListener("mousedown", startDraw);
-        canvas.addEventListener("mousemove", draw);
-        canvas.addEventListener("mouseup", stopDraw);
-        canvas.addEventListener("mouseleave", stopDraw);
+            function getPos(e) {{
+                const rect = canvas.getBoundingClientRect();
+                return {{
+                    x: e.clientX - rect.left,
+                    y: e.clientY - rect.top
+                }};
+            }}
 
-        canvas.addEventListener("touchstart", startDraw);
-        canvas.addEventListener("touchmove", draw);
-        canvas.addEventListener("touchend", stopDraw);
-    </script>
+            // Pointer Event handling with Apple Pencil (pen) filter
+            canvas.addEventListener("pointerdown", (e) => {{
+                // If Apple Pencil mode is active and pointer is finger touch, ALLOW default touch scroll
+                if (pencilOnly && e.pointerType === "touch") {{
+                    return; // Do not draw, allow normal finger scrolling!
+                }}
+
+                e.preventDefault();
+                isDrawing = true;
+                ctx.beginPath();
+                const pos = getPos(e);
+                ctx.moveTo(pos.x, pos.y);
+
+                if (currentMode === "eraser") {{
+                    ctx.globalCompositeOperation = "destination-out";
+                    ctx.lineWidth = currentSize * 4;
+                }} else {{
+                    ctx.globalCompositeOperation = "source-over";
+                    ctx.strokeStyle = "#ffffff";
+                    ctx.lineWidth = currentSize;
+                }}
+            }});
+
+            canvas.addEventListener("pointermove", (e) => {{
+                if (!isDrawing) return;
+                if (pencilOnly && e.pointerType === "touch") return;
+
+                e.preventDefault();
+                const pos = getPos(e);
+                ctx.lineTo(pos.x, pos.y);
+                ctx.stroke();
+            }});
+
+            const endDraw = (e) => {{
+                if (isDrawing) {{
+                    isDrawing = false;
+                }}
+            }};
+
+            canvas.addEventListener("pointerup", endDraw);
+            canvas.addEventListener("pointercancel", endDraw);
+            canvas.addEventListener("pointerleave", endDraw);
+        </script>
+    </body>
+    </html>
     """
-    components.html(canvas_html, height=270)
+    components.html(canvas_html, height=310)
 
 # Analyze lecture material using Gemini
 def analyze_lecture_material(client: genai.Client, parts: list):
@@ -300,7 +381,7 @@ def generate_additional_quizzes(client: genai.Client, lecture_context: str, exis
 def grade_user_answer(client: genai.Client, question: str, correct_answer: str, user_answer_text: str = None, user_image: Image.Image = None):
     system_instruction = """
 あなたは大学の厳格かつ丁寧な採点AI教員です。
-学生から提出された解答（テキストまたは手書きノート/キャンバス画像）を精密に手書き認識（OCR）して採点してください。
+学生から提出された解答（テキストまたはApple Pencil手書きノート/画像）を精密に手書き認識（OCR）して採点してください。
 
 【評価・認識の指針】：
 1. 手書き画像が含まれている場合は、画像の文字・数式・図を正確に読み取り、認識結果（recognizedContent）を提示してください。
@@ -322,11 +403,10 @@ def grade_user_answer(client: genai.Client, question: str, correct_answer: str, 
     if user_answer_text:
         contents.append(f"【学生のテキスト入力解答】: {user_answer_text}")
     if user_image:
-        # Convert PIL Image to Part
         img_byte_arr = io.BytesIO()
-        user_image.save(img_byte_arr, format=user_image.format if user_image.format else "PNG")
+        user_image.save(img_byte_arr, format="PNG")
         contents.append(types.Part.from_bytes(data=img_byte_arr.getvalue(), mime_type="image/png"))
-        contents.append("【学生の手書き画像解答】（添付画像）")
+        contents.append("【学生のApple Pencil手書き画像解答】（添付画像）")
 
     config = types.GenerateContentConfig(
         system_instruction=system_instruction,
@@ -646,7 +726,7 @@ else:
                         st.error(f"❌ **不正解** (あなたの解答: {attempt['userAnswer']})")
                     
                     if attempt.get("recognizedContent"):
-                        st.info(f"🔍 **AI手書き認識結果:**\n`{attempt['recognizedContent']}`")
+                        st.info(f"🔍 **AI手書き文字・数式認識結果:**\n`{attempt['recognizedContent']}`")
 
                     st.markdown(f"**模範解答:** {q['correctAnswer']}")
                     if attempt.get("gradedFeedback"):
@@ -665,31 +745,39 @@ else:
                             user_ans_text = st.radio("選択肢を選んでください", q.get('choices', []), key=f"radio_{q['id']}")
                         
                         else:
-                            input_type = st.radio("回答方法", ["📷 手書きノート/計算画像アップロード", "🎨 軽量手書きキャンバス", "⌨️ テキスト入力"], key=f"in_type_{q['id']}")
+                            input_type = st.radio(
+                                "回答方法", 
+                                ["✏️ Apple Pencil 手書きキャンバス (消しゴム付)", "📷 ノート写真/スクショ画像の添付", "⌨️ テキスト入力"], 
+                                key=f"in_type_{q['id']}"
+                            )
                             
-                            if input_type == "📷 手書きノート/計算画像アップロード":
-                                img_file = st.file_uploader("手書きノート・計算画像を添付", type=["png", "jpg", "jpeg"], key=f"img_{q['id']}")
+                            if "✏️" in input_type:
+                                render_apple_pencil_canvas(q['id'])
+                                img_file_c = st.file_uploader(
+                                    "キャンバスのスクショ画像や手書き写真を添付（Geminiが自動認識・採点）", 
+                                    type=["png", "jpg", "jpeg"], 
+                                    key=f"pencil_img_{q['id']}"
+                                )
+                                if img_file_c:
+                                    handwritten_image = Image.open(img_file_c)
+                                    st.image(handwritten_image, caption="手書き解析対象画像プレビュー", width=280)
+
+                            elif "📷" in input_type:
+                                img_file = st.file_uploader("手書きノート・計算写真を添付", type=["png", "jpg", "jpeg"], key=f"img_{q['id']}")
                                 if img_file:
                                     handwritten_image = Image.open(img_file)
                                     st.image(handwritten_image, caption="手書き添付画像プレビュー", width=280)
 
-                            elif input_type == "🎨 軽量手書きキャンバス":
-                                render_html5_canvas(q['id'])
-                                img_file_c = st.file_uploader("キャンバス描画のスクショまたはノート画像（Geminiに送信）", type=["png", "jpg", "jpeg"], key=f"c_img_{q['id']}")
-                                if img_file_c:
-                                    handwritten_image = Image.open(img_file_c)
-                                    st.image(handwritten_image, caption="送信画像プレビュー", width=280)
-
                             else:
                                 user_ans_text = st.text_input("解答を入力（LaTeX数式例: $x^2 + y^2 = 1$ など）", key=f"text_{q['id']}")
 
-                        submit_btn = st.form_submit_button("解答を提出して自動採点")
+                        submit_btn = st.form_submit_button("解答を提出して手書き自動認識・自動採点")
 
                         if submit_btn:
                             if not user_ans_text and handwritten_image is None:
-                                st.warning("解答を入力するか、画像をアップロードしてください。")
+                                st.warning("解答を入力するか、手書き画像を添付・アップロードしてください。")
                             else:
-                                with st.spinner("Gemini AI が手書き認識＆採点中..."):
+                                with st.spinner("Gemini AI が手書き文字・数式を認識（OCR）して採点中..."):
                                     try:
                                         if q['type'] == 'multiple-choice':
                                             is_correct = (user_ans_text == q['correctAnswer'])
@@ -707,7 +795,7 @@ else:
                                                 user_image=handwritten_image
                                             )
                                             active_session['attempts'][q['id']] = {
-                                                "userAnswer": user_ans_text or "（手書きノート画像解答）",
+                                                "userAnswer": user_ans_text or "（Apple Pencil手書き解答）",
                                                 "recognizedContent": grade_res.get("recognizedContent", ""),
                                                 "isCorrect": grade_res.get("isCorrect", False),
                                                 "gradedFeedback": grade_res.get("gradedFeedback", "")
