@@ -2,7 +2,8 @@ import os
 import json
 import io
 import uuid
-import base64
+import re
+import traceback
 import streamlit as st
 import streamlit.components.v1 as components
 from PIL import Image
@@ -33,6 +34,47 @@ def get_gemini_client():
     if not key:
         return None
     return genai.Client(api_key=key)
+
+# Safe JSON Parser Helper
+def parse_json_safely(raw_text: str):
+    if not raw_text:
+        raise ValueError("AIからの応答テキストが空でした。")
+    
+    # Remove markdown code block fences if present
+    cleaned = re.sub(r"^```(?:json)?\s*", "", raw_text.strip(), flags=re.MULTILINE)
+    cleaned = re.sub(r"\s*```$", "", cleaned.strip(), flags=re.MULTILINE)
+    
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        # Fallback: Extract JSON object or array pattern using regex
+        match = re.search(r'(\{.*\}|\[.*\])', cleaned, re.DOTALL)
+        if match:
+            return json.loads(match.group(1))
+        raise ValueError(f"JSON形式へのパースに失敗しました:\n{raw_text[:200]}...")
+
+# Robust Gemini API Call with Model Fallback
+def call_gemini_api(client: genai.Client, contents: list, config: types.GenerateContentConfig):
+    # Try gemini-3.6-flash first, fallback to 2.5-flash or 1.5-flash if needed
+    candidate_models = ["gemini-3.6-flash", "gemini-2.5-flash", "gemini-1.5-flash"]
+    last_exception = None
+
+    for model_name in candidate_models:
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=contents,
+                config=config
+            )
+            if response and response.text:
+                return response
+        except Exception as e:
+            last_exception = e
+            continue
+
+    if last_exception:
+        raise last_exception
+    raise RuntimeError("Gemini API から応答を取得できませんでした。")
 
 # Initialize Session States
 if "sessions" not in st.session_state:
@@ -99,7 +141,7 @@ def format_file_size(size_bytes: int) -> str:
     else:
         return f"{size_bytes / (1024 * 1024):.1f} MB"
 
-# Pure HTML5 Handwriting Canvas Component (Zero external Python dependencies)
+# Pure HTML5 Handwriting Canvas Component
 def render_html5_canvas(quiz_id: str):
     canvas_html = f"""
     <div style="font-family: sans-serif; background: #0f172a; padding: 12px; border-radius: 12px; color: white;">
@@ -108,7 +150,7 @@ def render_html5_canvas(quiz_id: str):
             <button onclick="clearCanvas()" style="background: #334155; color: white; border: none; padding: 4px 10px; border-radius: 6px; cursor: pointer; font-size: 11px;">消去</button>
         </div>
         <canvas id="canvas_{quiz_id}" width="500" height="200" style="background: #1e293b; border: 1px solid #475569; border-radius: 8px; cursor: crosshair; touch-action: none;"></canvas>
-        <p style="font-size: 11px; color: #94a3b8; margin-top: 6px;">※ 描画後、下の「ノート写真/キャンバス画像をアップロード」より手書き画像を添付するか、そのまま保存してください。</p>
+        <p style="font-size: 11px; color: #94a3b8; margin-top: 6px;">※ 描画後、画面のスクショまたはノート写真を選んで添付・送信してください。</p>
     </div>
     <script>
         const canvas = document.getElementById("canvas_{quiz_id}");
@@ -196,22 +238,24 @@ def analyze_lecture_material(client: genai.Client, parts: list):
       "choices": ["選択肢A", "選択肢B", "選択肢C", "選択肢D"],
       "correctAnswer": "選択肢A",
       "explanation": "詳しい解説..."
-    },
-    ... (合計10問分)
+    }
   ]
 }
 """
 
-    response = client.models.generate_content(
-        model="gemini-3.6-flash",
-        contents=[*parts, "講義資料を詳細に分析し、全体要約、ページごとの講師風解説、重要ポイント、およびデフォルト10問のテスト問題を含むJSONを出力してください。"],
-        config=types.GenerateContentConfig(
-            system_instruction=system_instruction,
-            response_mime_type="application/json",
-            temperature=0.3,
-        )
+    config = types.GenerateContentConfig(
+        system_instruction=system_instruction,
+        response_mime_type="application/json",
+        temperature=0.3,
     )
-    return json.loads(response.text)
+    
+    response = call_gemini_api(
+        client, 
+        contents=[*parts, "講義資料を詳細に分析し、全体要約、ページごとの講師風解説、重要ポイント、およびデフォルト10問のテスト問題を含むJSONを出力してください。"], 
+        config=config
+    )
+    
+    return parse_json_safely(response.text)
 
 # Generate additional quizzes (+5 questions)
 def generate_additional_quizzes(client: genai.Client, lecture_context: str, existing_quiz_count: int):
@@ -238,16 +282,19 @@ def generate_additional_quizzes(client: genai.Client, lecture_context: str, exis
 }}
 """
 
-    response = client.models.generate_content(
-        model="gemini-3.6-flash",
-        contents=[f"【講義コンテキスト】:\n{lecture_context}\n\n追加のテスト問題を5問生成してください。"],
-        config=types.GenerateContentConfig(
-            system_instruction=system_instruction,
-            response_mime_type="application/json",
-            temperature=0.5,
-        )
+    config = types.GenerateContentConfig(
+        system_instruction=system_instruction,
+        response_mime_type="application/json",
+        temperature=0.5,
     )
-    return json.loads(response.text).get("quizzes", [])
+
+    response = call_gemini_api(
+        client,
+        contents=[f"【講義コンテキスト】:\n{lecture_context}\n\n追加のテスト問題を5問生成してください。"],
+        config=config
+    )
+    parsed = parse_json_safely(response.text)
+    return parsed.get("quizzes", [])
 
 # Grade user's handwritten / image / text answer using Gemini multimodal OCR
 def grade_user_answer(client: genai.Client, question: str, correct_answer: str, user_answer_text: str = None, user_image: Image.Image = None):
@@ -275,19 +322,20 @@ def grade_user_answer(client: genai.Client, question: str, correct_answer: str, 
     if user_answer_text:
         contents.append(f"【学生のテキスト入力解答】: {user_answer_text}")
     if user_image:
-        contents.append(user_image)
+        # Convert PIL Image to Part
+        img_byte_arr = io.BytesIO()
+        user_image.save(img_byte_arr, format=user_image.format if user_image.format else "PNG")
+        contents.append(types.Part.from_bytes(data=img_byte_arr.getvalue(), mime_type="image/png"))
         contents.append("【学生の手書き画像解答】（添付画像）")
 
-    response = client.models.generate_content(
-        model="gemini-3.6-flash",
-        contents=contents,
-        config=types.GenerateContentConfig(
-            system_instruction=system_instruction,
-            response_mime_type="application/json",
-            temperature=0.2,
-        )
+    config = types.GenerateContentConfig(
+        system_instruction=system_instruction,
+        response_mime_type="application/json",
+        temperature=0.2,
     )
-    return json.loads(response.text)
+
+    response = call_gemini_api(client, contents=contents, config=config)
+    return parse_json_safely(response.text)
 
 # Chat response generator with Gemini
 def generate_chat_response(client: genai.Client, history: list, new_message: str, lecture_context: str):
@@ -311,14 +359,12 @@ def generate_chat_response(client: genai.Client, history: list, new_message: str
     
     formatted_contents.append(types.Content(role="user", parts=[types.Part.from_text(text=new_message)]))
 
-    response = client.models.generate_content(
-        model="gemini-3.6-flash",
-        contents=formatted_contents,
-        config=types.GenerateContentConfig(
-            system_instruction=system_instruction,
-            temperature=0.7,
-        )
+    config = types.GenerateContentConfig(
+        system_instruction=system_instruction,
+        temperature=0.7,
     )
+
+    response = call_gemini_api(client, contents=formatted_contents, config=config)
     return response.text
 
 
@@ -404,7 +450,7 @@ if not active_session:
             for u_file in uploaded_files:
                 file_bytes = u_file.read()
                 file_size_str = format_file_size(len(file_bytes))
-                mime_type = u_file.type
+                mime_type = u_file.type or "application/octet-stream"
                 
                 # Metadata record
                 recorded_file_meta.append({
@@ -415,14 +461,13 @@ if not active_session:
                     "bytes": file_bytes
                 })
 
-                if "pdf" in mime_type:
+                if "pdf" in mime_type or u_file.name.endswith(".pdf"):
                     pdf_text = extract_text_from_pdf(io.BytesIO(file_bytes))
                     uploaded_parts.append(pdf_text)
                     st.info(f"📄 {u_file.name}: PDFテキスト読み込み完了 ({len(pdf_text)} 文字)")
-                elif "image" in mime_type:
-                    img = Image.open(io.BytesIO(file_bytes))
-                    uploaded_parts.append(img)
-                    st.image(img, caption=f"🖼️ {u_file.name}", width=250)
+                elif "image" in mime_type or u_file.name.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
+                    uploaded_parts.append(types.Part.from_bytes(data=file_bytes, mime_type=mime_type or "image/png"))
+                    st.image(file_bytes, caption=f"🖼️ {u_file.name}", width=250)
                 else:
                     uploaded_parts.append(types.Part.from_bytes(data=file_bytes, mime_type=mime_type))
                     st.audio(file_bytes, format=mime_type)
@@ -443,7 +488,7 @@ if not active_session:
         if not uploaded_parts:
             st.error("講義資料ファイルまたはテキストを入力してください。")
         else:
-            with st.spinner("Gemini 3.6-flash が講義資料を詳細解析中...（10問テスト＆講師解説生成）"):
+            with st.spinner("Gemini AI が講義資料を詳細解析中...（10問テスト＆講師解説生成）"):
                 try:
                     result = analyze_lecture_material(client, uploaded_parts)
                     new_id = f"session_{uuid.uuid4().hex[:8]}"
@@ -466,7 +511,9 @@ if not active_session:
                     st.success("講義セッションの作成が完了しました！")
                     st.rerun()
                 except Exception as e:
-                    st.error(f"解析中にエラーが発生しました: {e}")
+                    st.error(f"解析中にエラーが発生しました:\n`{e}`")
+                    with st.expander("詳細エラーログ"):
+                        st.code(traceback.format_exc())
 
 
 # --- SCENARIO 2: Active Session Detail View ---
@@ -642,30 +689,33 @@ else:
                             if not user_ans_text and handwritten_image is None:
                                 st.warning("解答を入力するか、画像をアップロードしてください。")
                             else:
-                                with st.spinner("Gemini 3.6-flash が手書き認識＆採点中..."):
-                                    if q['type'] == 'multiple-choice':
-                                        is_correct = (user_ans_text == q['correctAnswer'])
-                                        active_session['attempts'][q['id']] = {
-                                            "userAnswer": user_ans_text,
-                                            "isCorrect": is_correct,
-                                            "gradedFeedback": None
-                                        }
-                                    else:
-                                        grade_res = grade_user_answer(
-                                            client,
-                                            question=q['question'],
-                                            correct_answer=q['correctAnswer'],
-                                            user_answer_text=user_ans_text,
-                                            user_image=handwritten_image
-                                        )
-                                        active_session['attempts'][q['id']] = {
-                                            "userAnswer": user_ans_text or "（手書きノート画像解答）",
-                                            "recognizedContent": grade_res.get("recognizedContent", ""),
-                                            "isCorrect": grade_res.get("isCorrect", False),
-                                            "gradedFeedback": grade_res.get("gradedFeedback", "")
-                                        }
-                                    st.success("採点が完了しました！")
-                                    st.rerun()
+                                with st.spinner("Gemini AI が手書き認識＆採点中..."):
+                                    try:
+                                        if q['type'] == 'multiple-choice':
+                                            is_correct = (user_ans_text == q['correctAnswer'])
+                                            active_session['attempts'][q['id']] = {
+                                                "userAnswer": user_ans_text,
+                                                "isCorrect": is_correct,
+                                                "gradedFeedback": None
+                                            }
+                                        else:
+                                            grade_res = grade_user_answer(
+                                                client,
+                                                question=q['question'],
+                                                correct_answer=q['correctAnswer'],
+                                                user_answer_text=user_ans_text,
+                                                user_image=handwritten_image
+                                            )
+                                            active_session['attempts'][q['id']] = {
+                                                "userAnswer": user_ans_text or "（手書きノート画像解答）",
+                                                "recognizedContent": grade_res.get("recognizedContent", ""),
+                                                "isCorrect": grade_res.get("isCorrect", False),
+                                                "gradedFeedback": grade_res.get("gradedFeedback", "")
+                                            }
+                                        st.success("採点が完了しました！")
+                                        st.rerun()
+                                    except Exception as e:
+                                        st.error(f"採点中にエラーが発生しました: {e}")
 
         st.divider()
 
@@ -674,7 +724,7 @@ else:
         st.caption("現在の講義内容をもとに、さらに追加で5問の小テストを生成します。")
         
         if st.button("🚀 追加問題（＋5問）を生成", key="add_quizzes_btn"):
-            with st.spinner("Gemini 3.6-flash が追加の小テスト5問を作成中..."):
+            with st.spinner("Gemini AI が追加の小テスト5問を作成中..."):
                 try:
                     lecture_ctx = f"講義タイトル: {active_session['title']}\n要約: {active_session['summaryText']}\nポイント: {', '.join(active_session['keyPoints'])}"
                     new_q_list = generate_additional_quizzes(client, lecture_ctx, len(quizzes))
